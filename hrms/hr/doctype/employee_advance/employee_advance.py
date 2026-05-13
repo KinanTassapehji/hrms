@@ -20,11 +20,6 @@ class EmployeeAdvanceOverPayment(frappe.ValidationError):
 
 
 class EmployeeAdvance(Document):
-	def onload(self):
-		self.get("__onload").make_payment_via_journal_entry = frappe.db.get_single_value(
-			"Accounts Settings", "make_payment_via_journal_entry"
-		)
-
 	def validate(self):
 		validate_active_employee(self.employee)
 		self.validate_advance_account_currency()
@@ -37,15 +32,32 @@ class EmployeeAdvance(Document):
 			default_advance_account = frappe.db.get_value(
 				"Company", self.company, "default_employee_advance_account"
 			)
-			if default_advance_account:
+			same_currency = self.currency == erpnext.get_company_currency(self.company)
+
+			if default_advance_account and same_currency:
 				self.advance_account = default_advance_account
-			else:
+				return
+
+			if not same_currency:
 				frappe.throw(
-					_(
-						'Advance Account is mandatory. Please set the <a href="/app/company/{0}#default_employee_advance_account" target="_blank">Default Employee Advance Account</a> in the Company record {0} and submit this document.'
-					).format(self.company),
-					title=_("Missing Advance Account"),
+					_("Please set the Advance Account {0} or in {1}").format(
+						get_link_to_form("Employee Advance", self.name + "#advance_account", _("here")),
+						get_link_to_form("Employee", self.employee + "#salary_information", self.employee),
+					),
+					title=_("Advance Account Required"),
 				)
+
+			frappe.throw(
+				_(
+					"Advance Account is mandatory. Please set the {0} in the Company {1} and submit this document."
+				).format(
+					get_link_to_form(
+						"Company", self.company + "#hr_and_payroll_tab", "Default Employee Advance Account"
+					),
+					frappe.bold(self.company),
+				),
+				title=_("Missing Advance Account"),
+			)
 
 	def on_cancel(self):
 		self.ignore_linked_doctypes = ("GL Entry", "Payment Ledger Entry", "Advance Payment Ledger Entry")
@@ -239,48 +251,7 @@ class EmployeeAdvance(Document):
 
 
 @frappe.whitelist()
-def make_bank_entry(dt, dn):
-	doc = frappe.get_doc(dt, dn)
-	payment_account = get_same_currency_bank_cash_account(doc.company, doc.currency, doc.mode_of_payment)
-
-	je = frappe.new_doc("Journal Entry")
-	je.posting_date = nowdate()
-	je.voucher_type = "Bank Entry"
-	je.company = doc.company
-	je.remark = "Payment against Employee Advance: " + dn + "\n" + doc.purpose
-	je.multi_currency = 1 if doc.currency != erpnext.get_company_currency(doc.company) else 0
-
-	je.append(
-		"accounts",
-		{
-			"account": doc.advance_account,
-			"account_currency": doc.currency,
-			"debit_in_account_currency": flt(doc.advance_amount),
-			"reference_type": "Employee Advance",
-			"reference_name": doc.name,
-			"party_type": "Employee",
-			"cost_center": erpnext.get_default_cost_center(doc.company),
-			"party": doc.employee,
-			"is_advance": "Yes",
-		},
-	)
-
-	je.append(
-		"accounts",
-		{
-			"account": payment_account.account or payment_account.name,
-			"cost_center": erpnext.get_default_cost_center(doc.company),
-			"credit_in_account_currency": flt(doc.advance_amount),
-			"account_currency": doc.currency,
-			"account_type": payment_account.account_type,
-		},
-	)
-
-	return je.as_dict()
-
-
-@frappe.whitelist()
-def create_return_through_additional_salary(doc):
+def create_return_through_additional_salary(doc: str | dict | Document) -> Document:
 	import json
 
 	if isinstance(doc, str):
@@ -300,14 +271,14 @@ def create_return_through_additional_salary(doc):
 
 @frappe.whitelist()
 def make_return_entry(
-	employee,
-	company,
-	employee_advance_name,
-	return_amount,
-	advance_account,
-	currency,
-	mode_of_payment=None,
-):
+	employee: str,
+	company: str,
+	employee_advance_name: str,
+	return_amount: str | float,
+	advance_account: str,
+	currency: str,
+	mode_of_payment: str | None = None,
+) -> dict:
 	bank_cash_account = get_same_currency_bank_cash_account(company, currency, mode_of_payment)
 
 	advance_account_currency = frappe.db.get_value("Account", advance_account, "account_currency")
